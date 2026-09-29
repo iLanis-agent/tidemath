@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TideMath</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f141b; color: #e8eef5; max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { margin: 0 0 4px; }
+  p.sub { color: #9fb0c3; margin: 0 0 20px; }
+  .presets { margin: 0 0 20px; }
+  .presets button { background: #1c2530; color: #9fc2e8; border: 1px solid #2d3b4d; border-radius: 999px; padding: 8px 16px; margin: 0 8px 8px 0; cursor: pointer; font-size: .9rem; }
+  .presets button:hover { background: #253243; }
+  section { background: #16202c; border: 1px solid #243143; border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  h2 { margin: 0 0 14px; font-size: 1.05rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; }
+  label { display: block; font-size: .8rem; color: #9fb0c3; margin-bottom: 4px; }
+  input { background: #0f141b; border: 1px solid #2d3b4d; color: #e8eef5; border-radius: 8px; padding: 9px 10px; width: 110px; font-size: 1rem; }
+  .outs { display: flex; flex-wrap: wrap; gap: 14px; }
+  .out { background: #101922; border: 1px solid #243143; border-radius: 12px; padding: 14px 18px; min-width: 140px; flex: 1; }
+  .out .v { font-size: 1.4rem; font-weight: 700; color: #7fc4ff; }
+  .out .k { font-size: .8rem; color: #9fb0c3; margin-top: 4px; }
+  .wide { min-width: 260px; }
+  .wide .v { font-size: 1.05rem; line-height: 1.45; }
+</style>
+</head>
+<body>
+<h1>&#127754; TideMath</h1>
+<p class="sub">Tide interpolation and clearance math - two tide points answer everything.</p>
+<div class="presets" id="presets"></div>
+
+<section>
+  <h2>1. Today's tides</h2>
+  <div class="row">
+    <div><label>Low time (hh:mm)</label><input id="tl" type="text" value="06:10"></div>
+    <div><label>Low height (m)</label><input id="hl" type="number" step="0.1" value="0.5"></div>
+    <div><label>High time (hh:mm)</label><input id="th" type="text" value="12:22"></div>
+    <div><label>High height (m)</label><input id="hh" type="number" step="0.1" value="2.9"></div>
+  </div>
+</section>
+
+<section>
+  <h2>2. Height right now (or any time)</h2>
+  <div class="row">
+    <div><label>Query time (hh:mm)</label><input id="qt" type="text" value="09:16"></div>
+  </div>
+  <div class="outs">
+    <div class="out"><div class="v" id="o-height">-</div><div class="k">Tide height</div></div>
+    <div class="out"><div class="v" id="o-trend">-</div><div class="k">Trend</div></div>
+    <div class="out wide"><div class="v" id="o-twelfths">-</div><div class="k">Twelfths check</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>3. Keel clearance</h2>
+  <div class="row">
+    <div><label>Charted depth (m)</label><input id="cd" type="number" step="0.1" value="1.0"></div>
+    <div><label>Draft (m)</label><input id="draft" type="number" step="0.1" value="1.5"></div>
+    <div><label>Safety margin (m)</label><input id="margin" type="number" step="0.1" value="0.5"></div>
+  </div>
+  <div class="outs">
+    <div class="out"><div class="v" id="o-clear">-</div><div class="k">Clearance now</div></div>
+    <div class="out wide"><div class="v" id="o-clearverdict">-</div><div class="k">Verdict</div></div>
+    <div class="out"><div class="v" id="o-window">-</div><div class="k">Passable window</div></div>
+    <div class="out wide"><div class="v" id="o-windownote">-</div><div class="k">Window detail</div></div>
+  </div>
+</section>
+
+<script>
+// TideMath engine - tide interpolation and clearance math. Pure functions, no DOM.
+(function (root) {
+  'use strict';
+
+  // Cosine interpolation of tide height at time t (minutes) between a low and a high.
+  // tLow/hLow: time and height of one extreme, tHigh/hHigh: the other. t between them.
+  function heightAt(t, tLow, hLow, tHigh, hHigh) {
+    if (tHigh <= tLow) throw new Error('high must come after low');
+    var mid = (hHigh + hLow) / 2;
+    var amp = (hHigh - hLow) / 2;
+    var frac = (t - tLow) / (tHigh - tLow);
+    if (frac < 0 || frac > 1) throw new Error('time outside the tide window');
+    return mid + amp * Math.cos(Math.PI * (1 - frac));
+  }
+
+  // Inverse: first time (minutes, rising) at which the height reaches h between low and high.
+  function timeForHeight(h, tLow, hLow, tHigh, hHigh) {
+    if (tHigh <= tLow) throw new Error('high must come after low');
+    var mid = (hHigh + hLow) / 2;
+    var amp = (hHigh - hLow) / 2;
+    var c = (h - mid) / amp;
+    if (c > 1 || c < -1) throw new Error('height outside this tide range');
+    var frac = 1 - Math.acos(c) / Math.PI;
+    return tLow + frac * (tHigh - tLow);
+  }
+
+  // Rule of twelfths: fraction of range moved in each of the 6 hours between extremes.
+  function twelfthsFractions() {
+    return [1 / 12, 2 / 12, 3 / 12, 3 / 12, 2 / 12, 1 / 12];
+  }
+
+  // Vertical clearance over an obstruction: charted depth + tide height - draft - safety margin.
+  function clearance(chartedDepth, tideHeight, draft, margin) {
+    return chartedDepth + tideHeight - draft - margin;
+  }
+
+  function clearanceVerdict(cm) {
+    if (cm >= 1.0) return 'comfortable - plenty of water under you';
+    if (cm >= 0.3) return 'fine - watch the sounder';
+    if (cm >= 0) return 'marginal - you are in the margin, go slow';
+    return 'aground territory - do not attempt';
+  }
+
+  // Passable window: times between low and high where clearance >= 0 (rising and falling roots).
+  // Returns {opens, closes} in minutes, or null if never passable / always passable flags.
+  function passableWindow(chartedDepth, draft, margin, tLow, hLow, tHigh, hHigh) {
+    var need = draft + margin - chartedDepth; // tide height required
+    var cLow = clearance(chartedDepth, hLow, draft, margin);
+    var cHigh = clearance(chartedDepth, hHigh, draft, margin);
+    if (cHigh < 0) return { passable: false, reason: 'not enough water even at high tide' };
+    if (cLow >= 0) return { passable: true, opens: tLow, closes: tHigh, note: 'passable through this whole stretch' };
+    var opens = timeForHeight(need, tLow, hLow, tHigh, hHigh);
+    // falling side: mirror around high (approximate symmetric fall over the same half-period)
+    var half = tHigh - tLow;
+    var closes = tHigh + (tHigh - opens);
+    return { passable: true, opens: opens, closes: closes, note: 'window ' + Math.round(closes - opens) + ' min' };
+  }
+
+  // Beach emergence: time the water drops to a level (falling side), given high then next low.
+  function emergesAt(targetHeight, tHigh, hHigh, tNextLow, hNextLow) {
+    // falling: interpolate from high to next low
+    var mid = (hHigh + hNextLow) / 2;
+    var amp = (hHigh - hNextLow) / 2;
+    var c = (targetHeight - mid) / amp;
+    if (c > 1 || c < -1) throw new Error('level outside this falling range');
+    var frac = Math.acos(c) / Math.PI;
+    return tHigh + frac * (tNextLow - tHigh);
+  }
+
+  function fmtTime(mins) {
+    var m = ((Math.round(mins) % 1440) + 1440) % 1440;
+    var h = Math.floor(m / 60), mm = m % 60;
+    return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
+  }
+
+  var api = {
+    heightAt: heightAt,
+    timeForHeight: timeForHeight,
+    twelfthsFractions: twelfthsFractions,
+    clearance: clearance,
+    clearanceVerdict: clearanceVerdict,
+    passableWindow: passableWindow,
+    emergesAt: emergesAt,
+    fmtTime: fmtTime
+  };
+  root.TideMath = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+(function () {
+  'use strict';
+  var E = window.TideMath;
+  function toMin(s) {
+    var m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
+    if (!m) return NaN;
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  }
+  function num(id) { return parseFloat(document.getElementById(id).value) || 0; }
+  function set(id, v) { document.getElementById(id).textContent = v; }
+
+  function compute() {
+    var tL = toMin(document.getElementById('tl').value);
+    var tH = toMin(document.getElementById('th').value);
+    var qt = toMin(document.getElementById('qt').value);
+    var hL = num('hl'), hH = num('hh');
+    if (isNaN(tL) || isNaN(tH) || tH <= tL) {
+      set('o-height', '?'); set('o-trend', '-'); set('o-twelfths', 'high tide must be after low tide');
+      set('o-clear', '-'); set('o-clearverdict', '-'); set('o-window', '-'); set('o-windownote', '-');
+      return;
+    }
+    var h = null;
+    if (!isNaN(qt) && qt >= tL && qt <= tH) {
+      h = E.heightAt(qt, tL, hL, tH, hH);
+      set('o-height', h.toFixed(2) + ' m');
+      var span = tH - tL;
+      var frac = (qt - tL) / span;
+      var hour = Math.min(5, Math.floor(frac * 6));
+      var fr = E.twelfthsFractions()[hour];
+      set('o-trend', frac < 0.5 ? 'rising' : (frac < 1 ? 'rising, slowing' : 'high'));
+      set('o-twelfths', 'hour ' + (hour + 1) + ' of 6 - about ' + Math.round(fr * 100) + '% of the range moves this hour');
+    } else {
+      set('o-height', '?'); set('o-trend', '-'); set('o-twelfths', 'query time must sit between low and high');
+    }
+    var cd = num('cd'), draft = num('draft'), margin = num('margin');
+    if (h !== null) {
+      var cm = E.clearance(cd, h, draft, margin);
+      set('o-clear', (cm >= 0 ? '+' : '') + cm.toFixed(2) + ' m');
+      set('o-clearverdict', E.clearanceVerdict(cm));
+    } else {
+      set('o-clear', '-'); set('o-clearverdict', '-');
+    }
+    var w = E.passableWindow(cd, draft, margin, tL, hL, tH, hH);
+    if (!w.passable) {
+      set('o-window', 'never'); set('o-windownote', w.reason);
+    } else {
+      set('o-window', E.fmtTime(w.opens) + ' - ' + E.fmtTime(w.closes));
+      set('o-windownote', w.note);
+    }
+  }
+
+  var presets = [
+    { name: 'Morning sail', v: { tl: '06:10', hl: 0.5, th: '12:22', hh: 2.9, qt: '09:16', cd: 1.0, draft: 1.5, margin: 0.5 } },
+    { name: 'Deep keel worry', v: { tl: '05:40', hl: 0.8, th: '11:55', hh: 1.6, qt: '08:45', cd: 0.6, draft: 1.8, margin: 0.4 } },
+    { name: 'Dinghy landing', v: { tl: '07:05', hl: 0.3, th: '13:18', hh: 3.4, qt: '10:00', cd: 0.4, draft: 0.3, margin: 0.2 } },
+    { name: 'Big spring tide', v: { tl: '04:50', hl: 0.2, th: '11:02', hh: 4.1, qt: '08:00', cd: 1.2, draft: 1.2, margin: 0.5 } }
+  ];
+  var holder = document.getElementById('presets');
+  presets.forEach(function (p) {
+    var b = document.createElement('button');
+    b.textContent = p.name;
+    b.addEventListener('click', function () {
+      Object.keys(p.v).forEach(function (k) {
+        var el = document.getElementById(k);
+        if (el) el.value = p.v[k];
+      });
+      compute();
+    });
+    holder.appendChild(b);
+  });
+
+  ['tl', 'hl', 'th', 'hh', 'qt', 'cd', 'draft', 'margin'].forEach(function (id) {
+    var el = document.getElementById(id);
+    el.addEventListener('input', compute);
+    el.addEventListener('change', compute);
+  });
+  compute();
+})();
+</script>
+</body>
+</html>
